@@ -1,0 +1,69 @@
+# ~/.hermes/config.yaml — Nexus Night Shift Agent
+# Copy to ~/.hermes/config.yaml during setup (install.sh does this automatically).
+# Edit values here; run `hermes config set <key> <value>` for individual changes.
+
+# ---------------------------------------------------------------------------
+# Model — use Hermes 3 70B via OpenRouter for all routine agent tasks.
+# Claude API is called programmatically via workspace/tools/claude_escalate.py
+# for spec drafting, doc writing, and research synthesis.
+# ---------------------------------------------------------------------------
+model:
+  default: "nousresearch/hermes-3-llama-3.1-70b"
+  provider: "openrouter"
+
+# ---------------------------------------------------------------------------
+# Agent behavior
+# ---------------------------------------------------------------------------
+agent:
+  max_turns: 80              # Allow complex multi-step tasks
+  reasoning_effort: "high"   # Strong reasoning for PM work
+  verbose: false
+
+# ---------------------------------------------------------------------------
+# Memory — the agent should remember across sessions
+# ---------------------------------------------------------------------------
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 4000    # Generous limit for product context
+  nudge_interval: 15         # Remind agent to save learnings every 15 turns
+  flush_min_turns: 8
+
+# ---------------------------------------------------------------------------
+# Context compression — keep long sessions manageable
+# ---------------------------------------------------------------------------
+compression:
+  enabled: true
+  threshold: 0.80            # Compress at 80% context usage
+
+# ---------------------------------------------------------------------------
+# Session reset — start fresh each day on Telegram
+# ---------------------------------------------------------------------------
+session_reset:
+  mode: daily
+  at_hour: 4                 # Reset at 4 AM (after overnight work, before report)
+
+# ---------------------------------------------------------------------------
+# Toolsets — enable the full toolset for the Telegram gateway
+# ---------------------------------------------------------------------------
+platform_toolsets:
+  telegram: [hermes-telegram]
+  cli: [hermes-cli]
+
+# ---------------------------------------------------------------------------
+# Code execution — needed for claude_escalate.py calls
+# ---------------------------------------------------------------------------
+code_execution:
+  timeout: 180
+  max_tool_calls: 60
+
+# ---------------------------------------------------------------------------
+# Skills — auto-create skills from successful complex task completions
+# ---------------------------------------------------------------------------
+skills:
+  auto_create: true          # Generate new skills after complex tasks
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+always_log_local: true
