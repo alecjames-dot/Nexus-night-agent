@@ -1,0 +1,26 @@
+[Unit]
+Description=Nexus Night Shift Agent — Telegram Gateway
+Documentation=https://github.com/nexus-xyz/nexus-night-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexus-agent
+Group=nexus-agent
+WorkingDirectory=/opt/nexus-night-agent
+EnvironmentFile=/etc/nexus-agent.env
+ExecStart=/opt/nexus-night-agent/.venv/bin/python /opt/nexus-night-agent/scripts/agent_main.py
+Restart=on-failure
+RestartSec=10s
+StandardOutput=append:/var/log/nexus-agent.log
+StandardError=append:/var/log/nexus-agent.log
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/workspace /var/log/nexus-agent.log
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+# Never commit secrets
+.env
+/etc/nexus-agent.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Runtime output (workspace output is on the VM, not in repo)
+workspace/output/
+workspace/briefs/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
