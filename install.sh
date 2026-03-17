@@ -167,6 +167,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7b. Create /etc/nexus-agent.env for the systemd service
+# ---------------------------------------------------------------------------
+SYSTEM_ENV="/etc/nexus-agent.env"
+if [[ ! -f "$SYSTEM_ENV" ]]; then
+    log "Creating $SYSTEM_ENV (requires sudo) — you MUST fill in your API keys."
+    sudo tee "$SYSTEM_ENV" > /dev/null <<'EOF'
+# /etc/nexus-agent.env — Nexus Night Shift Agent secrets
+# Loaded by the nexus-agent.service systemd unit and all cron scripts.
+# Permissions: 640, owned by root:nexus-agent (or root:<your-user>)
+# NEVER commit this file or expose it.
+
+# OpenRouter API key (for Hermes 3 70B — routine tasks)
+OPENROUTER_API_KEY=sk-or-REPLACE_ME
+
+# Anthropic API key (for Claude Sonnet — complex reasoning tasks)
+ANTHROPIC_API_KEY=sk-ant-REPLACE_ME
+
+# Telegram bot token (from @BotFather)
+TELEGRAM_BOT_TOKEN=REPLACE_ME
+
+# Your Telegram user ID (from @userinfobot — restricts bot to you only)
+TELEGRAM_ALLOWED_USER_ID=REPLACE_ME
+
+# Workspace root
+WORKSPACE_ROOT=/workspace
+
+# Spend ceilings (USD) — adjust to your comfort level
+NIGHT_SPEND_CEILING_USD=10.00
+TASK_SPEND_CEILING_USD=3.00
+
+# Log level
+LOG_LEVEL=INFO
+EOF
+    # Readable only by root and the service user
+    sudo chmod 640 "$SYSTEM_ENV"
+    # Determine the service user and set group ownership
+    if id "nexus-agent" &>/dev/null; then
+        sudo chown root:nexus-agent "$SYSTEM_ENV"
+    else
+        sudo chown root:"$USER" "$SYSTEM_ENV"
+        warn "nexus-agent user not found — set group ownership manually before starting the service."
+    fi
+    log "$SYSTEM_ENV created. Fill in all REPLACE_ME values before starting the service."
+else
+    log "$SYSTEM_ENV already exists — not overwriting. Verify all values are set."
+fi
+
+# ---------------------------------------------------------------------------
 # 8. Install Telegram gateway as a systemd user service
 # ---------------------------------------------------------------------------
 info "Installing Telegram gateway service..."

@@ -33,6 +33,13 @@ TOOLS_DIR = WORKSPACE_ROOT / "tools"
 HERMES_COST_PER_1M = {"input": 0.90, "output": 0.90}   # approx OpenRouter pricing
 CLAUDE_COST_PER_1M = {"input": 3.00, "output": 15.00}  # claude-sonnet-4 pricing
 
+# Spend ceilings — configurable via environment variables
+NIGHT_SPEND_CEILING_USD = float(os.environ.get("NIGHT_SPEND_CEILING_USD", "10.00"))
+TASK_SPEND_CEILING_USD = float(os.environ.get("TASK_SPEND_CEILING_USD", "3.00"))
+
+TOKEN_USAGE_LOG = WORKSPACE_ROOT / "tracking" / "token-usage.log"
+TOKEN_LOG_HEADER = "# date       | model             | input_tok | output_tok |  cost_usd\n"
+
 
 class ExecutionStats:
     def __init__(self):
@@ -85,11 +92,38 @@ class TaskExecutor:
         context = self._load_context()
 
         for task in tasks:
+            # Per-night ceiling: refuse to start if budget already exhausted
+            current_spend = self.stats.total_cost()
+            if current_spend >= NIGHT_SPEND_CEILING_USD:
+                msg = (
+                    f"Task {task.number} ({task.slug}) not started — "
+                    f"night spend ceiling ${NIGHT_SPEND_CEILING_USD:.2f} reached "
+                    f"(spent so far: ${current_spend:.2f})"
+                )
+                log.warning(msg)
+                self.stats.blocked.append(msg)
+                if telegram_update:
+                    await telegram_update.message.reply_text(f"🛑 {msg}")
+                break
+
             self._current_task = task.slug
             log.info("Executing task %d [%s]: %s", task.number, task.task_type, task.raw[:60])
+            cost_before_task = self.stats.total_cost()
 
             try:
                 result = await self._execute_task(task, context, output_dir)
+
+                # Per-task ceiling: warn if this task spent more than expected
+                task_cost = self.stats.total_cost() - cost_before_task
+                if task_cost > TASK_SPEND_CEILING_USD:
+                    warn_msg = (
+                        f"[COST WARNING: task spent ${task_cost:.2f}, "
+                        f"ceiling is ${TASK_SPEND_CEILING_USD:.2f}] "
+                    )
+                    log.warning("Task %d exceeded per-task ceiling: $%.2f", task.number, task_cost)
+                    result["notes"] = warn_msg + result.get("notes", "")
+                result["cost_usd"] = round(task_cost, 4)
+
                 self.stats.tasks_completed.append(result)
                 if telegram_update:
                     await telegram_update.message.reply_text(
@@ -110,6 +144,9 @@ class TaskExecutor:
         report_path = output_dir / "report.md"
         report_path.write_text(report, encoding="utf-8")
         log.info("Morning report written to %s", report_path)
+
+        # Append this session's token usage to the persistent log
+        self._log_token_usage(today)
 
         self._status = "idle"
         self._current_task = None
@@ -398,3 +435,31 @@ class TaskExecutor:
         ]
 
         return "\n".join(lines)
+
+    def _log_token_usage(self, today: str) -> None:
+        """Append this session's token usage to the persistent log."""
+        log_path = TOKEN_USAGE_LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        write_header = not log_path.exists() or log_path.stat().st_size == 0
+
+        hermes_total = self.stats.hermes_input_tokens + self.stats.hermes_output_tokens
+        claude_total = self.stats.claude_input_tokens + self.stats.claude_output_tokens
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            if write_header:
+                f.write(TOKEN_LOG_HEADER)
+            f.write(
+                f"{today} | hermes-3-70b      | {self.stats.hermes_input_tokens:>9,} | "
+                f"{self.stats.hermes_output_tokens:>10,} | ${self.stats.hermes_cost():>8.4f}\n"
+            )
+            f.write(
+                f"{today} | claude-sonnet-4   | {self.stats.claude_input_tokens:>9,} | "
+                f"{self.stats.claude_output_tokens:>10,} | ${self.stats.claude_cost():>8.4f}\n"
+            )
+            f.write(
+                f"{today} | TOTAL             | {hermes_total + claude_total:>9,} | "
+                f"{'':>10} | ${self.stats.total_cost():>8.4f}\n"
+            )
+
+        log.info("Token usage logged to %s", log_path)
