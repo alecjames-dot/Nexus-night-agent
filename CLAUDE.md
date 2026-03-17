@@ -75,10 +75,10 @@
     - VM: DigitalOcean Basic Premium Droplet, 2 vCPU / 4GB RAM, Ubuntu 24.04
     - User: deploy (not root)
     - Python: 3.11+ in .venv
-    - Model: claude-sonnet-4-6 via Anthropic API (direct, not OpenRouter)
+    - Model: claude-sonnet-4-6 via OpenRouter API (anthropic/claude-sonnet-4-6)
 
     Environment variables (in /etc/nexus-agent.env):
-    - ANTHROPIC_API_KEY
+    - OPENROUTER_API_KEY
     - TELEGRAM_BOT_TOKEN
     - TELEGRAM_ALLOWED_USER_ID
     - WORKSPACE_ROOT (default: /workspace)
@@ -137,7 +137,7 @@
   <current_status>
     - Architecture: Claude Sonnet 4.6 as sole model (Week 1 testing phase)
     - Telegram gateway: systemd service (nexus-agent.service)
-    - All tasks execute via anthropic.AsyncAnthropic in task_executor.py
+    - All tasks execute via httpx in task_executor.py (OpenRouter OpenAI-compatible endpoint)
     - Skill documents in /workspace/skills/ guide Claude's task execution
     - Context files in /workspace/context/ loaded as system prompt for every task
   </current_status>
