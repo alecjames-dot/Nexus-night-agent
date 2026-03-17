@@ -34,7 +34,7 @@ HERMES_COST_PER_1M = {"input": 0.90, "output": 0.90}   # approx OpenRouter prici
 CLAUDE_COST_PER_1M = {"input": 3.00, "output": 15.00}  # claude-sonnet-4 pricing
 
 # Spend ceilings — configurable via environment variables
-NIGHT_SPEND_CEILING_USD = float(os.environ.get("NIGHT_SPEND_CEILING_USD", "10.00"))
+NIGHT_SPEND_CEILING_USD = float(os.environ.get("NIGHT_SPEND_CEILING_USD", "5.00"))
 TASK_SPEND_CEILING_USD = float(os.environ.get("TASK_SPEND_CEILING_USD", "3.00"))
 
 TOKEN_USAGE_LOG = WORKSPACE_ROOT / "tracking" / "token-usage.log"
