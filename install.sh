@@ -243,6 +243,15 @@ PYTHON_BIN="$REPO_DIR/.venv/bin/python"
 # Fall back to system python3 if the venv doesn't exist yet
 command -v "$PYTHON_BIN" &>/dev/null || PYTHON_BIN="$(command -v python3)"
 
+# Ensure the log file exists and is writable by this user (cron runs as user, not root)
+NEXUS_LOG="/var/log/nexus-agent.log"
+if [[ ! -f "$NEXUS_LOG" ]]; then
+    sudo touch "$NEXUS_LOG"
+    sudo chown "$USER:$USER" "$NEXUS_LOG"
+    sudo chmod 644 "$NEXUS_LOG"
+    log "Created $NEXUS_LOG"
+fi
+
 CRON_REMINDER="30 23 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/check_brief.py reminder >> /var/log/nexus-agent.log 2>&1"
 CRON_FALLBACK=" 5  0 * * 2-6 $PYTHON_BIN $REPO_DIR/scripts/check_brief.py fallback >> /var/log/nexus-agent.log 2>&1"
 CRON_REPORT="  0  7 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/morning_report.py >> /var/log/nexus-agent.log 2>&1"

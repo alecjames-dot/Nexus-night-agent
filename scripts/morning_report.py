@@ -75,7 +75,6 @@ async def main():
         await bot.send_message(
             chat_id=TELEGRAM_ALLOWED_USER_ID,
             text=prefix + chunk,
-            parse_mode="Markdown",
         )
         if len(chunks) > 1:
             await asyncio.sleep(0.5)
