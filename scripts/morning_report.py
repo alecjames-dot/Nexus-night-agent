@@ -51,6 +51,22 @@ def split_message(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
     return chunks or [text[:limit]]
 
 
+def get_task_output_files(workspace_root: Path) -> list[Path]:
+    """Return all task output .md files from the latest output directory, sorted by name."""
+    output_root = workspace_root / "output"
+    if not output_root.exists():
+        return []
+    dated_dirs = sorted([d for d in output_root.iterdir() if d.is_dir()], reverse=True)
+    for dated_dir in dated_dirs:
+        if not (dated_dir / "report.md").exists():
+            continue
+        files = sorted(
+            f for f in dated_dir.rglob("*.md") if f.name != "report.md"
+        )
+        return files
+    return []
+
+
 async def main():
     report = BriefHandler.get_latest_report(WORKSPACE_ROOT)
 
@@ -66,9 +82,10 @@ async def main():
         )
         return
 
-    log.info("Sending morning report (%d chars)...", len(report))
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
+    # Send report summary
+    log.info("Sending morning report (%d chars)...", len(report))
     chunks = split_message(report)
     for i, chunk in enumerate(chunks):
         prefix = f"📋 Morning Report (part {i+1}/{len(chunks)})\n\n" if len(chunks) > 1 else "📋 "
@@ -78,8 +95,24 @@ async def main():
         )
         if len(chunks) > 1:
             await asyncio.sleep(0.5)
-
     log.info("Morning report delivered (%d message(s)).", len(chunks))
+
+    # Send task output files as documents
+    output_files = get_task_output_files(WORKSPACE_ROOT)
+    if output_files:
+        await bot.send_message(
+            chat_id=TELEGRAM_ALLOWED_USER_ID,
+            text=f"📎 Attaching {len(output_files)} task output file(s):",
+        )
+        for output_file in output_files:
+            with open(output_file, "rb") as f:
+                await bot.send_document(
+                    chat_id=TELEGRAM_ALLOWED_USER_ID,
+                    document=f,
+                    filename=output_file.name,
+                )
+            log.info("Sent file: %s", output_file.name)
+            await asyncio.sleep(0.3)
 
 
 if __name__ == "__main__":

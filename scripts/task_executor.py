@@ -40,8 +40,6 @@ TASK_SPEND_CEILING_USD = float(os.environ.get("TASK_SPEND_CEILING_USD", "3.00"))
 TOKEN_USAGE_LOG = WORKSPACE_ROOT / "tracking" / "token-usage.log"
 TOKEN_LOG_HEADER = "# date       | model             | input_tok | output_tok |  cost_usd\n"
 
-TELEGRAM_MAX_CHARS = 4096
-
 
 class ExecutionStats:
     def __init__(self):
@@ -113,7 +111,7 @@ class TaskExecutor:
             cost_before_task = self.stats.total_cost()
 
             try:
-                result = await self._execute_task(task, context, output_dir, telegram_update)
+                result = await self._execute_task(task, context, output_dir)
 
                 # Per-task ceiling: warn if this task spent more than expected
                 task_cost = self.stats.total_cost() - cost_before_task
@@ -149,26 +147,7 @@ class TaskExecutor:
         self._status = "idle"
         self._current_task = None
 
-    @staticmethod
-    def _split_message(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
-        """Split text into chunks at paragraph boundaries, respecting Telegram's char limit."""
-        if len(text) <= limit:
-            return [text]
-        chunks = []
-        current = ""
-        for para in text.split("\n\n"):
-            candidate = current + ("\n\n" if current else "") + para
-            if len(candidate) <= limit:
-                current = candidate
-            else:
-                if current:
-                    chunks.append(current)
-                current = para
-        if current:
-            chunks.append(current)
-        return chunks or [text[:limit]]
-
-    async def _execute_task(self, task, context: str, output_dir: Path, telegram_update=None) -> dict:
+    async def _execute_task(self, task, context: str, output_dir: Path) -> dict:
         """Route and execute a single task."""
         task_dir = output_dir / task.slug
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -193,15 +172,6 @@ class TaskExecutor:
         output_file = task_dir / f"{task.slug}.md"
         output_file.write_text(result_text, encoding="utf-8")
         log.info("Output written to %s", output_file)
-
-        # Send full output to Telegram
-        if telegram_update:
-            header = f"📄 *Task {task.number}: {task.slug}*\n\n"
-            chunks = self._split_message(header + result_text)
-            for i, chunk in enumerate(chunks):
-                if len(chunks) > 1 and i > 0:
-                    chunk = f"_(part {i+1}/{len(chunks)})_\n\n" + chunk
-                await telegram_update.message.reply_text(chunk)
 
         # Check if this task generated a reusable skill pattern
         skill_note = self._maybe_create_skill(task, result_text)
