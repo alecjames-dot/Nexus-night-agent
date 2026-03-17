@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Nexus Night Shift Agent — VM Setup Script
-# Target: Ubuntu 22.04+ (Hetzner CPX31 or equivalent)
-# Run as the user who will run the agent (NOT root — Hermes installs per-user)
+# Target: Ubuntu 22.04+
+# Run as the user who will run the agent (NOT root)
 #
 # Usage:
 #   bash install.sh
 #
 # What this does:
-#   1. Installs Hermes Agent via the official installer
+#   1. Creates Python virtual environment and installs dependencies
 #   2. Creates /workspace/ directory structure
-#   3. Seeds context files, skill documents, and tools
-#   4. Configures ~/.hermes/ (config.yaml, .env, SOUL.md)
-#   5. Installs Telegram gateway as a systemd user service
-#   6. Registers cron jobs via Hermes
+#   3. Seeds context files, skill documents, and tracking files
+#   4. Creates /etc/nexus-agent.env (secrets — fill in before starting)
+#   5. Installs Telegram gateway as a systemd service
+#   6. Registers cron jobs via system crontab
 # =============================================================================
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$REPO_DIR/.venv"
+PYTHON_BIN="$VENV_DIR/bin/python"
+NEXUS_LOG="/var/log/nexus-agent.log"
 
 log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 info() { echo ""; echo "  ▶ $*"; }
@@ -31,157 +33,68 @@ die()  { echo "[ERROR] $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 [[ $EUID -eq 0 ]] && die "Do not run as root. Run as the agent user (e.g. 'ubuntu')."
 
-command -v curl &>/dev/null || die "curl is required. Install with: sudo apt-get install curl"
+command -v python3 &>/dev/null  || die "python3 required: sudo apt-get install python3 python3-venv"
+command -v python3 -m venv --help &>/dev/null 2>&1 || \
+  python3 -c "import venv" 2>/dev/null || \
+  die "python3-venv required: sudo apt-get install python3-venv"
 
 if [[ ! -f "$REPO_DIR/workspace/context/agent-role.md" ]]; then
     die "Cannot find workspace/context/agent-role.md — run this script from the repo root."
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Install Hermes Agent
+# 1. Python virtual environment
 # ---------------------------------------------------------------------------
-info "Installing Hermes Agent..."
-if command -v hermes &>/dev/null; then
-    log "Hermes Agent already installed at $(which hermes). Running update..."
-    hermes update || warn "Update failed — continuing with existing version."
+info "Setting up Python virtual environment..."
+if [[ ! -d "$VENV_DIR" ]]; then
+    python3 -m venv "$VENV_DIR"
+    log "Created venv at $VENV_DIR"
 else
-    log "Installing Hermes Agent via official installer..."
-    curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
-
-    # Reload shell PATH so 'hermes' is available in this script
-    # The installer typically adds to ~/.bashrc / ~/.zshrc
-    export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
-
-    command -v hermes &>/dev/null || {
-        # Try common install locations
-        for candidate in "$HOME/.local/bin/hermes" "$HOME/.hermes/bin/hermes" "/usr/local/bin/hermes"; do
-            [[ -x "$candidate" ]] && { ln -sf "$candidate" "$HOME/.local/bin/hermes" 2>/dev/null || true; break; }
-        done
-        export PATH="$HOME/.local/bin:$PATH"
-    }
-
-    command -v hermes &>/dev/null || die "Hermes Agent installed but 'hermes' not in PATH. Open a new shell and re-run."
+    log "Venv already exists at $VENV_DIR"
 fi
 
-log "Hermes version: $(hermes --version 2>/dev/null || echo 'unknown')"
+"$VENV_DIR/bin/pip" install --quiet --upgrade pip
+"$VENV_DIR/bin/pip" install --quiet -r "$REPO_DIR/requirements.txt"
+log "Python dependencies installed."
 
 # ---------------------------------------------------------------------------
-# 2. Install Python dependencies for Claude escalation utility
-# ---------------------------------------------------------------------------
-info "Installing Python dependencies..."
-if command -v pip3 &>/dev/null; then
-    pip3 install --user httpx python-dotenv 2>/dev/null || \
-        warn "pip install failed — httpx may already be available or needs manual install."
-else
-    warn "pip3 not found — install httpx manually: sudo apt-get install python3-pip && pip3 install httpx"
-fi
-
-# ---------------------------------------------------------------------------
-# 3. Workspace directory structure
+# 2. Workspace directory structure
 # ---------------------------------------------------------------------------
 info "Creating workspace at $WORKSPACE_ROOT..."
 sudo mkdir -p "$WORKSPACE_ROOT"
 sudo chown "$USER:$USER" "$WORKSPACE_ROOT"
 
-for d in exchange-specs nexus-docs research tracking output briefs context tools skills config; do
+for d in exchange-specs nexus-docs research tracking output briefs context tools skills; do
     mkdir -p "$WORKSPACE_ROOT/$d"
 done
 
+touch "$WORKSPACE_ROOT/output/.gitkeep" "$WORKSPACE_ROOT/briefs/.gitkeep"
 log "Workspace directories created at $WORKSPACE_ROOT"
 
 # ---------------------------------------------------------------------------
-# 4. Deploy context files, tools, and skill documents
+# 3. Deploy context files, skill documents, and tracking files
 # ---------------------------------------------------------------------------
 info "Deploying context files..."
 cp -r "$REPO_DIR/workspace/context/."  "$WORKSPACE_ROOT/context/"
-cp -r "$REPO_DIR/workspace/tools/."    "$WORKSPACE_ROOT/tools/"
 cp -r "$REPO_DIR/workspace/tracking/." "$WORKSPACE_ROOT/tracking/"
 cp    "$REPO_DIR/workspace/standing-tasks.md" "$WORKSPACE_ROOT/"
 
-info "Deploying skill documents to ~/.hermes/skills/..."
-mkdir -p "$HERMES_HOME/skills"
-for skill_file in "$REPO_DIR/workspace/skills/"*.skill.md; do
-    skill_name=$(basename "$skill_file" .skill.md)
-    skill_dir="$HERMES_HOME/skills/$skill_name"
-    mkdir -p "$skill_dir"
-    cp "$skill_file" "$skill_dir/SKILL.md"
-    log "  Installed skill: $skill_name"
-done
+info "Deploying skill documents to $WORKSPACE_ROOT/skills/..."
+cp -r "$REPO_DIR/workspace/skills/." "$WORKSPACE_ROOT/skills/"
+log "Skills deployed."
 
 # ---------------------------------------------------------------------------
-# 5. Configure ~/.hermes/config.yaml
-# ---------------------------------------------------------------------------
-info "Configuring Hermes Agent..."
-mkdir -p "$HERMES_HOME"
-
-HERMES_CONFIG="$HERMES_HOME/config.yaml"
-if [[ ! -f "$HERMES_CONFIG" ]]; then
-    log "Creating $HERMES_CONFIG from template..."
-    cp "$REPO_DIR/workspace/config/hermes-config.yaml" "$HERMES_CONFIG"
-else
-    log "$HERMES_CONFIG already exists — backing up to ${HERMES_CONFIG}.bak and merging key settings."
-    cp "$HERMES_CONFIG" "${HERMES_CONFIG}.bak"
-fi
-
-# Apply key model settings via hermes config set
-hermes config set model.provider openrouter
-hermes config set model.default "nousresearch/hermes-3-llama-3.1-70b"
-log "Model configured: OpenRouter → nousresearch/hermes-3-llama-3.1-70b"
-
-# ---------------------------------------------------------------------------
-# 6. Configure ~/.hermes/SOUL.md (agent personality + workspace context)
-# ---------------------------------------------------------------------------
-SOUL_FILE="$HERMES_HOME/SOUL.md"
-info "Installing SOUL.md (agent personality)..."
-cp "$REPO_DIR/workspace/config/SOUL.md" "$SOUL_FILE"
-log "SOUL.md installed at $SOUL_FILE"
-
-# ---------------------------------------------------------------------------
-# 7. Configure ~/.hermes/.env (API keys)
-# ---------------------------------------------------------------------------
-HERMES_ENV="$HERMES_HOME/.env"
-if [[ ! -f "$HERMES_ENV" ]]; then
-    log "Creating $HERMES_ENV — you MUST fill in your API keys."
-    cat > "$HERMES_ENV" <<'EOF'
-# Hermes Agent environment — fill in your actual keys
-# This file is mode 600; never commit it.
-
-# OpenRouter API key (for Hermes 3 70B — routine tasks)
-OPENROUTER_API_KEY=sk-or-REPLACE_ME
-
-# Anthropic API key (for Claude Sonnet — complex reasoning tasks)
-ANTHROPIC_API_KEY=sk-ant-REPLACE_ME
-
-# Telegram bot token (from @BotFather)
-TELEGRAM_BOT_TOKEN=REPLACE_ME
-
-# Your Telegram chat ID (from @userinfobot — restricts bot to you only)
-TELEGRAM_HOME_CHANNEL=REPLACE_ME
-
-# Workspace root
-WORKSPACE_ROOT=/workspace
-EOF
-    chmod 600 "$HERMES_ENV"
-else
-    log "$HERMES_ENV already exists — not overwriting. Ensure all keys are set."
-fi
-
-# ---------------------------------------------------------------------------
-# 7b. Create /etc/nexus-agent.env for the systemd service
+# 4. Create /etc/nexus-agent.env (secrets file for systemd + cron)
 # ---------------------------------------------------------------------------
 SYSTEM_ENV="/etc/nexus-agent.env"
 if [[ ! -f "$SYSTEM_ENV" ]]; then
-    log "Creating $SYSTEM_ENV (requires sudo) — you MUST fill in your API keys."
-    sudo tee "$SYSTEM_ENV" > /dev/null <<'EOF'
+    info "Creating $SYSTEM_ENV (requires sudo) — fill in API keys before starting the service."
+    sudo tee "$SYSTEM_ENV" > /dev/null <<'ENVEOF'
 # /etc/nexus-agent.env — Nexus Night Shift Agent secrets
-# Loaded by the nexus-agent.service systemd unit and all cron scripts.
-# Permissions: 640, owned by root:nexus-agent (or root:<your-user>)
-# NEVER commit this file or expose it.
+# Loaded by nexus-agent.service and all cron scripts.
+# Permissions: 640 — NEVER commit this file or expose it.
 
-# OpenRouter API key (for Hermes 3 70B — routine tasks)
-OPENROUTER_API_KEY=sk-or-REPLACE_ME
-
-# Anthropic API key (for Claude Sonnet — complex reasoning tasks)
+# Anthropic API key (Claude Sonnet — all task execution)
 ANTHROPIC_API_KEY=sk-ant-REPLACE_ME
 
 # Telegram bot token (from @BotFather)
@@ -193,58 +106,24 @@ TELEGRAM_ALLOWED_USER_ID=REPLACE_ME
 # Workspace root
 WORKSPACE_ROOT=/workspace
 
-# Spend ceilings (USD) — adjust to your comfort level
+# Spend ceilings (USD) — agent stops starting new tasks if cumulative night
+# spend exceeds NIGHT_SPEND_CEILING_USD; warns if a single task exceeds TASK_SPEND_CEILING_USD
 NIGHT_SPEND_CEILING_USD=5.00
 TASK_SPEND_CEILING_USD=3.00
 
 # Log level
 LOG_LEVEL=INFO
-EOF
-    # Readable only by root and the service user
+ENVEOF
     sudo chmod 640 "$SYSTEM_ENV"
-    # Determine the service user and set group ownership
-    if id "nexus-agent" &>/dev/null; then
-        sudo chown root:nexus-agent "$SYSTEM_ENV"
-    else
-        sudo chown root:"$USER" "$SYSTEM_ENV"
-        warn "nexus-agent user not found — set group ownership manually before starting the service."
-    fi
+    sudo chown root:"$USER" "$SYSTEM_ENV"
     log "$SYSTEM_ENV created. Fill in all REPLACE_ME values before starting the service."
 else
     log "$SYSTEM_ENV already exists — not overwriting. Verify all values are set."
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Install Telegram gateway as a systemd user service
+# 5. Create log file
 # ---------------------------------------------------------------------------
-info "Installing Telegram gateway service..."
-hermes gateway install --platform telegram 2>/dev/null || {
-    warn "hermes gateway install failed — may require manual service setup."
-    warn "Run manually: hermes gateway --platform telegram"
-}
-
-# ---------------------------------------------------------------------------
-# 9. Register cron jobs via Hermes
-# ---------------------------------------------------------------------------
-info "Registering cron jobs..."
-
-hermes cron add "Every weeknight at 11:30 PM, check whether a nightly brief has been received in Telegram today (look for a file in $WORKSPACE_ROOT/briefs/ with today's date). If no brief file exists and no brief was received in the current Telegram session, send a Telegram message: 'No brief received yet — should I work from the standing task queue at $WORKSPACE_ROOT/standing-tasks.md?'"
-
-hermes cron add "Every weekday morning at 7:00 AM, read the most recent morning report from $WORKSPACE_ROOT/output/ (find the latest dated folder and read report.md), then send the full report as a Telegram message to the home channel. If no report exists, send: 'Good morning! No overnight report was generated. The agent may not have received a brief last night.'"
-
-log "Cron jobs registered."
-
-# ---------------------------------------------------------------------------
-# 10. System crontab — Python fallback scripts (separate from Hermes crons)
-# ---------------------------------------------------------------------------
-info "Configuring system crontab entries..."
-
-PYTHON_BIN="$REPO_DIR/.venv/bin/python"
-# Fall back to system python3 if the venv doesn't exist yet
-command -v "$PYTHON_BIN" &>/dev/null || PYTHON_BIN="$(command -v python3)"
-
-# Ensure the log file exists and is writable by this user (cron runs as user, not root)
-NEXUS_LOG="/var/log/nexus-agent.log"
 if [[ ! -f "$NEXUS_LOG" ]]; then
     sudo touch "$NEXUS_LOG"
     sudo chown "$USER:$USER" "$NEXUS_LOG"
@@ -252,11 +131,34 @@ if [[ ! -f "$NEXUS_LOG" ]]; then
     log "Created $NEXUS_LOG"
 fi
 
-CRON_REMINDER="30 23 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/check_brief.py reminder >> /var/log/nexus-agent.log 2>&1"
-CRON_FALLBACK=" 5  0 * * 2-6 $PYTHON_BIN $REPO_DIR/scripts/check_brief.py fallback >> /var/log/nexus-agent.log 2>&1"
-CRON_REPORT="  0  7 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/morning_report.py >> /var/log/nexus-agent.log 2>&1"
+# ---------------------------------------------------------------------------
+# 6. Install systemd service
+# ---------------------------------------------------------------------------
+info "Installing systemd service..."
+SERVICE_SRC="$REPO_DIR/services/nexus-agent.service"
+SERVICE_DST="/etc/systemd/system/nexus-agent.service"
 
-# Add entries idempotently — strip any existing nexus cron lines, then append
+if [[ -f "$SERVICE_SRC" ]]; then
+    sudo cp "$SERVICE_SRC" "$SERVICE_DST"
+    # Patch ExecStart and WorkingDirectory to match this install location
+    sudo sed -i "s|ExecStart=.*|ExecStart=$PYTHON_BIN $REPO_DIR/scripts/agent_main.py|" "$SERVICE_DST"
+    sudo sed -i "s|WorkingDirectory=.*|WorkingDirectory=$REPO_DIR|" "$SERVICE_DST"
+    sudo systemctl daemon-reload
+    sudo systemctl enable nexus-agent.service
+    log "Service installed and enabled."
+else
+    warn "services/nexus-agent.service not found — service not installed."
+fi
+
+# ---------------------------------------------------------------------------
+# 7. System crontab
+# ---------------------------------------------------------------------------
+info "Configuring system crontab..."
+
+CRON_REMINDER="30 23 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/check_brief.py reminder >> $NEXUS_LOG 2>&1"
+CRON_FALLBACK=" 5  0 * * 2-6 $PYTHON_BIN $REPO_DIR/scripts/check_brief.py fallback >> $NEXUS_LOG 2>&1"
+CRON_REPORT="   0  7 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/morning_report.py >> $NEXUS_LOG 2>&1"
+
 (
   crontab -l 2>/dev/null | grep -v "check_brief\|morning_report\|nexus-agent"
   echo "$CRON_REMINDER"
@@ -264,14 +166,8 @@ CRON_REPORT="  0  7 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/morning_report.py >> /
   echo "$CRON_REPORT"
 ) | crontab -
 
-log "System crontab updated. Current entries:"
+log "System crontab updated:"
 crontab -l
-
-# ---------------------------------------------------------------------------
-# 11. Smoke test the installation
-# ---------------------------------------------------------------------------
-info "Running hermes doctor..."
-hermes doctor 2>/dev/null || warn "hermes doctor reported issues — review before first run."
 
 # ---------------------------------------------------------------------------
 log ""
@@ -280,20 +176,21 @@ log " Installation complete!"
 log "=========================================="
 log ""
 log " REQUIRED: Fill in your API keys:"
-log "   nano $HERMES_ENV"
+log "   sudo nano $SYSTEM_ENV"
 log ""
 log " Keys needed:"
-log "   OPENROUTER_API_KEY  — from openrouter.ai"
-log "   ANTHROPIC_API_KEY   — from console.anthropic.com"
-log "   TELEGRAM_BOT_TOKEN  — from @BotFather on Telegram"
-log "   TELEGRAM_HOME_CHANNEL — your Telegram chat ID (from @userinfobot)"
+log "   ANTHROPIC_API_KEY        — from console.anthropic.com"
+log "   TELEGRAM_BOT_TOKEN       — from @BotFather on Telegram"
+log "   TELEGRAM_ALLOWED_USER_ID — your Telegram user ID (@userinfobot)"
 log ""
-log " After filling keys, start the gateway:"
-log "   hermes gateway --platform telegram"
+log " Start the agent:"
+log "   sudo systemctl start nexus-agent"
+log "   sudo systemctl status nexus-agent"
 log ""
-log " Verify it works by sending your bot any message."
+log " View logs:"
+log "   tail -f $NEXUS_LOG"
+log "   sudo journalctl -u nexus-agent -f"
 log ""
 log " Night 1 smoke test:"
-log "   python3 $REPO_DIR/scripts/smoke_test.py"
+log "   $PYTHON_BIN $REPO_DIR/scripts/smoke_test.py"
 log ""
-log " Full guide: README.md"
