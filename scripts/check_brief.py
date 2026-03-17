@@ -13,7 +13,6 @@ Crontab:
 import asyncio
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -76,12 +75,18 @@ async def run_fallback():
     )
 
     scripts_dir = Path(__file__).parent
-    proc = subprocess.Popen(
-        [sys.executable, str(scripts_dir / "standing_tasks.py")],
-        stdout=open("/var/log/nexus-agent.log", "a"),
-        stderr=subprocess.STDOUT,
+    log.info("Launching standing_tasks.py --fallback")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(scripts_dir / "standing_tasks.py"),
+        "--fallback",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
-    log.info("Standing tasks started (PID %d).", proc.pid)
+    stdout, _ = await proc.communicate()
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        log.info("[standing_tasks] %s", line)
+    log.info("Standing tasks finished (exit code %d).", proc.returncode)
 
 
 if __name__ == "__main__":

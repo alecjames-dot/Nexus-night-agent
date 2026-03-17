@@ -3,6 +3,7 @@ Standing Tasks Executor
 Called when no nightly brief is received — works from the prioritized backlog.
 """
 
+import argparse
 import asyncio
 import logging
 import os
@@ -54,17 +55,27 @@ def load_standing_tasks() -> list[Task]:
     return p0_tasks
 
 
-async def main():
+async def main(fallback_mode: bool = False):
     tasks = load_standing_tasks()
     if not tasks:
         log.info("No standing tasks to execute.")
         return
 
     executor = TaskExecutor(WORKSPACE_ROOT)
+    executor.fallback_mode = fallback_mode
+    if fallback_mode:
+        log.info("Running in FALLBACK mode — no brief was received tonight.")
     log.info("Running %d standing tasks...", len(tasks))
     await executor.execute_all(tasks)
     log.info("Standing tasks complete.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Run the standing task queue.")
+    parser.add_argument(
+        "--fallback",
+        action="store_true",
+        help="Mark this run as a fallback (no brief received). Noted in morning report.",
+    )
+    args = parser.parse_args()
+    asyncio.run(main(fallback_mode=args.fallback))

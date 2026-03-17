@@ -187,7 +187,31 @@ hermes cron add "Every weekday morning at 7:00 AM, read the most recent morning 
 log "Cron jobs registered."
 
 # ---------------------------------------------------------------------------
-# 10. Smoke test the installation
+# 10. System crontab — Python fallback scripts (separate from Hermes crons)
+# ---------------------------------------------------------------------------
+info "Configuring system crontab entries..."
+
+PYTHON_BIN="$REPO_DIR/.venv/bin/python"
+# Fall back to system python3 if the venv doesn't exist yet
+command -v "$PYTHON_BIN" &>/dev/null || PYTHON_BIN="$(command -v python3)"
+
+CRON_REMINDER="30 23 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/check_brief.py reminder >> /var/log/nexus-agent.log 2>&1"
+CRON_FALLBACK=" 5  0 * * 2-6 $PYTHON_BIN $REPO_DIR/scripts/check_brief.py fallback >> /var/log/nexus-agent.log 2>&1"
+CRON_REPORT="  0  7 * * 1-5 $PYTHON_BIN $REPO_DIR/scripts/morning_report.py >> /var/log/nexus-agent.log 2>&1"
+
+# Add entries idempotently — strip any existing nexus cron lines, then append
+(
+  crontab -l 2>/dev/null | grep -v "check_brief\|morning_report\|nexus-agent"
+  echo "$CRON_REMINDER"
+  echo "$CRON_FALLBACK"
+  echo "$CRON_REPORT"
+) | crontab -
+
+log "System crontab updated. Current entries:"
+crontab -l
+
+# ---------------------------------------------------------------------------
+# 11. Smoke test the installation
 # ---------------------------------------------------------------------------
 info "Running hermes doctor..."
 hermes doctor 2>/dev/null || warn "hermes doctor reported issues — review before first run."

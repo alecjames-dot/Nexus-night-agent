@@ -67,6 +67,7 @@ class TaskExecutor:
         self.stats = ExecutionStats()
         self._current_task: Optional[str] = None
         self._status: str = "idle"
+        self.fallback_mode: bool = False  # Set True when running standing task queue
 
     def get_status(self) -> str:
         if self._status == "idle":
@@ -333,6 +334,13 @@ class TaskExecutor:
         completed = self.stats.tasks_completed
         n = len(completed)
         blocked = self.stats.blocked
+
+        if self.fallback_mode:
+            lines.append(
+                "**Mode: FALLBACK** — No brief was received; "
+                "the standing task queue (P0 tasks) was executed automatically."
+            )
+            lines.append("")
 
         if n == 0 and not blocked:
             lines.append("No tasks were completed this session.")
