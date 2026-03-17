@@ -1,24 +1,26 @@
 """
-Task Executor — executes all tasks via Claude Sonnet (Anthropic API).
+Task Executor — executes all tasks via Claude Sonnet on OpenRouter.
 
-All task types route directly to claude-sonnet-4-6.
+All task types route to claude-sonnet-4-6 via the OpenRouter API
+(OpenAI-compatible endpoint).
 """
 
-import asyncio
 import logging
 import os
 from datetime import date
 from pathlib import Path
 from typing import Optional
 
-import anthropic
+import httpx
 
 log = logging.getLogger(__name__)
 
 WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT", "/workspace"))
-CLAUDE_MODEL = "claude-sonnet-4-6"
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+CLAUDE_MODEL = "anthropic/claude-sonnet-4-6"
 
-# Cost per 1M tokens (claude-sonnet-4-6, as of 2025)
+# Cost per 1M tokens (claude-sonnet-4-6 via OpenRouter, as of 2025)
 CLAUDE_COST_PER_1M = {"input": 3.00, "output": 15.00}
 
 # Spend ceilings — configurable via environment variables
@@ -53,9 +55,6 @@ class TaskExecutor:
         self._current_task: Optional[str] = None
         self._status: str = "idle"
         self.fallback_mode: bool = False
-        self._client = anthropic.AsyncAnthropic(
-            api_key=os.environ.get("ANTHROPIC_API_KEY")
-        )
 
     def get_status(self) -> str:
         if self._status == "idle":
@@ -170,7 +169,10 @@ Current task: {self._current_task or 'none'}"
 ".join(parts)
 
     async def _call_claude(self, task, context: str) -> str:
-        """Call Claude Sonnet directly with task and full context."""
+        """Call Claude Sonnet via OpenRouter (OpenAI-compatible endpoint)."""
+        if not OPENROUTER_API_KEY:
+            raise EnvironmentError("OPENROUTER_API_KEY not set")
+
         system = (
             "You are the Nexus Night Shift PM agent — an autonomous product management assistant "
             "working overnight for the Nexus blockchain and Nexus Exchange products. "
@@ -207,32 +209,43 @@ Current task: {self._current_task or 'none'}"
             "Execute the following task and write the output as a well-structured markdown document.",
         )
 
-        user_message = f"TASK:
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://nexus.xyz",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": CLAUDE_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": f"TASK:
 {task.raw}
 
 INSTRUCTION:
-{instruction}"
+{instruction}"},
+                    ],
+                    "max_tokens": 8192,
+                    "temperature": 0.3,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
-        response = await self._client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=8192,
-            temperature=0.3,
-            system=system,
-            messages=[{"role": "user", "content": user_message}],
-        )
-
-        usage = response.usage
-        self.stats.input_tokens += usage.input_tokens
-        self.stats.output_tokens += usage.output_tokens
+        usage = data.get("usage", {})
+        self.stats.input_tokens += usage.get("prompt_tokens", 0)
+        self.stats.output_tokens += usage.get("completion_tokens", 0)
 
         log.info(
             "Claude usage — in: %d, out: %d, cost: $%.4f",
-            usage.input_tokens,
-            usage.output_tokens,
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
             self.stats.total_cost(),
         )
 
-        return response.content[0].text
+        return data["choices"][0]["message"]["content"]
 
     def _maybe_create_skill(self, task, result_text: str) -> Optional[str]:
         """Append a learned example to the matching skill document, if it exists."""
@@ -334,7 +347,7 @@ INSTRUCTION:
         lines += [
             "",
             "## Token Usage & Cost",
-            f"- **Model:** {CLAUDE_MODEL}",
+            f"- **Model:** {CLAUDE_MODEL} (via OpenRouter)",
             f"- **Input tokens:** {self.stats.input_tokens:,}",
             f"- **Output tokens:** {self.stats.output_tokens:,}",
             f"- **Total cost:** ~${self.stats.total_cost():.4f}",
