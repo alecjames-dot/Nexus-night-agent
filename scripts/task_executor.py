@@ -1,71 +1,49 @@
 """
-Task Executor — routes tasks to the appropriate model and writes output.
+Task Executor — executes all tasks via Claude Sonnet (Anthropic API).
 
-Routing logic:
-  spec-draft, doc-write  → Claude API (via claude_escalate.py)
-  research               → OpenRouter/Hermes 3 + optional Claude synthesis
-  organize, track-update → OpenRouter/Hermes 3
-  general                → OpenRouter/Hermes 3
+All task types route directly to claude-sonnet-4-6.
 """
 
 import asyncio
-import json
 import logging
 import os
-import subprocess
-import sys
-import time
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
-import httpx
+import anthropic
 
 log = logging.getLogger(__name__)
 
 WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT", "/workspace"))
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = "nousresearch/hermes-3-llama-3.1-70b"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-TOOLS_DIR = WORKSPACE_ROOT / "tools"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
-# Cost tracking (approximate, per 1M tokens)
-HERMES_COST_PER_1M = {"input": 0.90, "output": 0.90}   # approx OpenRouter pricing
-CLAUDE_COST_PER_1M = {"input": 3.00, "output": 15.00}  # claude-sonnet-4 pricing
+# Cost per 1M tokens (claude-sonnet-4-6, as of 2025)
+CLAUDE_COST_PER_1M = {"input": 3.00, "output": 15.00}
 
 # Spend ceilings — configurable via environment variables
 NIGHT_SPEND_CEILING_USD = float(os.environ.get("NIGHT_SPEND_CEILING_USD", "5.00"))
 TASK_SPEND_CEILING_USD = float(os.environ.get("TASK_SPEND_CEILING_USD", "3.00"))
 
 TOKEN_USAGE_LOG = WORKSPACE_ROOT / "tracking" / "token-usage.log"
-TOKEN_LOG_HEADER = "# date       | model             | input_tok | output_tok |  cost_usd\n"
+TOKEN_LOG_HEADER = "# date       | model             | input_tok | output_tok |  cost_usd
+"
 
 
 class ExecutionStats:
     def __init__(self):
-        self.hermes_input_tokens = 0
-        self.hermes_output_tokens = 0
-        self.claude_input_tokens = 0
-        self.claude_output_tokens = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
         self.tasks_completed: list[dict] = []
         self.decisions: list[str] = []
         self.blocked: list[str] = []
         self.skills_created: list[str] = []
 
-    def hermes_cost(self) -> float:
-        return (
-            self.hermes_input_tokens / 1_000_000 * HERMES_COST_PER_1M["input"]
-            + self.hermes_output_tokens / 1_000_000 * HERMES_COST_PER_1M["output"]
-        )
-
-    def claude_cost(self) -> float:
-        return (
-            self.claude_input_tokens / 1_000_000 * CLAUDE_COST_PER_1M["input"]
-            + self.claude_output_tokens / 1_000_000 * CLAUDE_COST_PER_1M["output"]
-        )
-
     def total_cost(self) -> float:
-        return self.hermes_cost() + self.claude_cost()
+        return (
+            self.input_tokens / 1_000_000 * CLAUDE_COST_PER_1M["input"]
+            + self.output_tokens / 1_000_000 * CLAUDE_COST_PER_1M["output"]
+        )
 
 
 class TaskExecutor:
@@ -74,12 +52,16 @@ class TaskExecutor:
         self.stats = ExecutionStats()
         self._current_task: Optional[str] = None
         self._status: str = "idle"
-        self.fallback_mode: bool = False  # Set True when running standing task queue
+        self.fallback_mode: bool = False
+        self._client = anthropic.AsyncAnthropic(
+            api_key=os.environ.get("ANTHROPIC_API_KEY")
+        )
 
     def get_status(self) -> str:
         if self._status == "idle":
             return "Agent is idle — no active execution."
-        return f"Status: {self._status}\nCurrent task: {self._current_task or 'none'}"
+        return f"Status: {self._status}
+Current task: {self._current_task or 'none'}"
 
     async def execute_all(self, tasks, telegram_update=None) -> None:
         """Execute all tasks from the brief, write output, generate report."""
@@ -92,7 +74,6 @@ class TaskExecutor:
         context = self._load_context()
 
         for task in tasks:
-            # Per-night ceiling: refuse to start if budget already exhausted
             current_spend = self.stats.total_cost()
             if current_spend >= NIGHT_SPEND_CEILING_USD:
                 msg = (
@@ -113,7 +94,6 @@ class TaskExecutor:
             try:
                 result = await self._execute_task(task, context, output_dir)
 
-                # Per-task ceiling: warn if this task spent more than expected
                 task_cost = self.stats.total_cost() - cost_before_task
                 if task_cost > TASK_SPEND_CEILING_USD:
                     warn_msg = (
@@ -127,58 +107,37 @@ class TaskExecutor:
                 self.stats.tasks_completed.append(result)
             except Exception as exc:
                 log.exception("Task %d failed: %s", task.number, exc)
-                self.stats.blocked.append(
-                    f"Task {task.number} ({task.slug}): {exc}"
-                )
+                self.stats.blocked.append(f"Task {task.number} ({task.slug}): {exc}")
                 if telegram_update:
                     await telegram_update.message.reply_text(
                         f"⚠️ Task {task.number} blocked: {exc}"
                     )
 
-        # Generate and save morning report
         report = self._generate_report(today)
         report_path = output_dir / "report.md"
         report_path.write_text(report, encoding="utf-8")
         log.info("Morning report written to %s", report_path)
 
-        # Append this session's token usage to the persistent log
         self._log_token_usage(today)
 
         self._status = "idle"
         self._current_task = None
 
     async def _execute_task(self, task, context: str, output_dir: Path) -> dict:
-        """Route and execute a single task."""
+        """Execute a single task via Claude Sonnet."""
         task_dir = output_dir / task.slug
         task_dir.mkdir(parents=True, exist_ok=True)
 
-        if task.task_type in ("spec-draft", "doc-write"):
-            result_text = await self._run_claude_escalation(task, context)
-            model_used = "claude"
-        elif task.task_type == "research":
-            # First gather with Hermes, then synthesize with Claude
-            raw = await self._run_hermes(
-                task,
-                context,
-                instruction="Gather and organize relevant information. Include source URLs.",
-            )
-            result_text = await self._run_claude_synthesis(task.raw, raw)
-            model_used = "hermes+claude"
-        else:
-            result_text = await self._run_hermes(task, context)
-            model_used = "hermes"
+        result_text = await self._call_claude(task, context)
 
-        # Write output file
         output_file = task_dir / f"{task.slug}.md"
         output_file.write_text(result_text, encoding="utf-8")
         log.info("Output written to %s", output_file)
 
-        # Check if this task generated a reusable skill pattern
         skill_note = self._maybe_create_skill(task, result_text)
         if skill_note:
             self.stats.skills_created.append(skill_note)
 
-        # Extract a brief notes snippet from the first non-empty line of output
         notes = ""
         for line in result_text.splitlines():
             line = line.strip().lstrip("#").strip()
@@ -190,7 +149,7 @@ class TaskExecutor:
             "task_number": task.number,
             "task_type": task.task_type,
             "slug": task.slug,
-            "model_used": model_used,
+            "model_used": CLAUDE_MODEL,
             "output_path": str(output_file.relative_to(self.workspace)),
             "status": "complete",
             "notes": notes,
@@ -202,131 +161,81 @@ class TaskExecutor:
         parts = []
         for md_file in sorted(context_dir.glob("*.md")):
             try:
-                parts.append(f"=== {md_file.name} ===\n{md_file.read_text(encoding='utf-8')}")
+                parts.append(f"=== {md_file.name} ===
+{md_file.read_text(encoding='utf-8')}")
             except Exception as e:
                 log.warning("Could not read context file %s: %s", md_file, e)
-        return "\n\n".join(parts)
+        return "
 
-    async def _run_hermes(
-        self, task, context: str, instruction: str = ""
-    ) -> str:
-        """Call Hermes 3 via OpenRouter."""
-        if not OPENROUTER_API_KEY:
-            raise EnvironmentError("OPENROUTER_API_KEY not set")
+".join(parts)
 
+    async def _call_claude(self, task, context: str) -> str:
+        """Call Claude Sonnet directly with task and full context."""
         system = (
-            "You are the Nexus Night Shift PM agent. "
-            "Execute the following task using the provided context.\n\n"
-            f"CONTEXT:\n{context}"
+            "You are the Nexus Night Shift PM agent — an autonomous product management assistant "
+            "working overnight for the Nexus blockchain and Nexus Exchange products. "
+            "Execute the following task with precision and depth. Write production-ready output.
+
+"
+            f"CONTEXT:
+{context}"
         )
-        user = f"TASK:\n{task.raw}\n\n{instruction}".strip()
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://nexus.xyz",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": OPENROUTER_MODEL,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "max_tokens": 4096,
-                    "temperature": 0.3,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        usage = data.get("usage", {})
-        self.stats.hermes_input_tokens += usage.get("prompt_tokens", 0)
-        self.stats.hermes_output_tokens += usage.get("completion_tokens", 0)
-
-        return data["choices"][0]["message"]["content"]
-
-    async def _run_claude_escalation(self, task, context: str) -> str:
-        """Run claude_escalate.py for spec drafting or doc writing."""
-        tool_path = TOOLS_DIR / "claude_escalate.py"
-        python = sys.executable
-
-        if task.task_type == "spec-draft":
-            cmd = [python, str(tool_path), "draft-spec", task.raw, context]
-        else:  # doc-write
-            cmd = [python, str(tool_path), "draft-doc", task.raw, context]
-
-        env = {**os.environ}
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
+        task_instructions = {
+            "spec-draft": (
+                "Draft a complete feature specification section following the conventions "
+                "in spec-conventions.md. Include Feature ID, User Story, Requirements (use 'must' "
+                "not 'should'), Edge Cases (minimum 3), Acceptance Criteria (Given/When/Then format), "
+                "and Open Questions."
+            ),
+            "doc-write": (
+                "Write complete developer documentation. Include a Prerequisites section, "
+                "step-by-step guide, code examples using the correct chain IDs "
+                "(mainnet=3946, testnet=3945) and RPC endpoints "
+                "(mainnet=https://rpc.nexus.xyz, testnet=https://rpc-testnet.nexus.xyz), "
+                "and a Common Errors section with at least 3 items."
+            ),
+            "research": (
+                "Research the topic thoroughly and synthesize findings into structured "
+                "recommendations. Include a comparison table, key findings, and prioritized "
+                "P0/P1/P2 next steps explicitly framed for Nexus Exchange or Nexus chain context. "
+                "Cite source URLs for all factual claims."
+            ),
+        }
+        instruction = task_instructions.get(
+            task.task_type,
+            "Execute the following task and write the output as a well-structured markdown document.",
         )
-        stdout, stderr = await proc.communicate()
 
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"claude_escalate.py failed (code {proc.returncode}): "
-                f"{stderr.decode()[:500]}"
-            )
+        user_message = f"TASK:
+{task.raw}
 
-        # Parse token usage from stderr
-        for line in stderr.decode().splitlines():
-            if "[claude_escalate] tokens:" in line:
-                try:
-                    parts = line.split()
-                    for p in parts:
-                        if p.startswith("in="):
-                            self.stats.claude_input_tokens += int(p[3:])
-                        elif p.startswith("out="):
-                            self.stats.claude_output_tokens += int(p[4:])
-                except (ValueError, IndexError):
-                    pass
+INSTRUCTION:
+{instruction}"
 
-        return stdout.decode("utf-8")
-
-    async def _run_claude_synthesis(self, topic: str, raw_research: str) -> str:
-        """Run claude_escalate.py synthesize for research tasks."""
-        tool_path = TOOLS_DIR / "claude_escalate.py"
-        python = sys.executable
-
-        cmd = [python, str(tool_path), "synthesize", topic, raw_research]
-        env = {**os.environ}
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
+        response = await self._client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=8192,
+            temperature=0.3,
+            system=system,
+            messages=[{"role": "user", "content": user_message}],
         )
-        stdout, stderr = await proc.communicate()
 
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"claude_escalate.py synthesize failed: {stderr.decode()[:500]}"
-            )
+        usage = response.usage
+        self.stats.input_tokens += usage.input_tokens
+        self.stats.output_tokens += usage.output_tokens
 
-        for line in stderr.decode().splitlines():
-            if "[claude_escalate] tokens:" in line:
-                try:
-                    parts = line.split()
-                    for p in parts:
-                        if p.startswith("in="):
-                            self.stats.claude_input_tokens += int(p[3:])
-                        elif p.startswith("out="):
-                            self.stats.claude_output_tokens += int(p[4:])
-                except (ValueError, IndexError):
-                    pass
+        log.info(
+            "Claude usage — in: %d, out: %d, cost: $%.4f",
+            usage.input_tokens,
+            usage.output_tokens,
+            self.stats.total_cost(),
+        )
 
-        return stdout.decode("utf-8")
+        return response.content[0].text
 
     def _maybe_create_skill(self, task, result_text: str) -> Optional[str]:
-        """
-        If the task produced high-quality output, create or update a Skill Document.
-        Returns a description string if a skill was created, else None.
-        """
+        """Append a learned example to the matching skill document, if it exists."""
         skills_dir = self.workspace / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
 
@@ -342,14 +251,19 @@ class TaskExecutor:
 
         skill_path = skills_dir / f"{skill_name}.skill.md"
         if not skill_path.exists():
-            return None  # Seeded skills should already exist
+            return None
 
-        # Append a learned example to the skill doc
         example_note = (
-            f"\n\n## Learned Example — {date.today().isoformat()}\n"
-            f"**Task:** {task.raw[:120]}...\n"
-            f"**Pattern used:** {task.task_type}\n"
-            f"_Auto-appended by agent after successful completion._\n"
+            f"
+
+## Learned Example — {date.today().isoformat()}
+"
+            f"**Task:** {task.raw[:120]}...
+"
+            f"**Pattern used:** {task.task_type}
+"
+            f"_Auto-appended by agent after successful completion._
+"
         )
         with open(skill_path, "a", encoding="utf-8") as f:
             f.write(example_note)
@@ -379,10 +293,9 @@ class TaskExecutor:
             lines.append("No tasks were completed this session.")
         else:
             task_names = ", ".join(t["slug"].replace("-", " ") for t in completed)
-            model_summary = {t["model_used"] for t in completed}
             lines.append(
                 f"Completed {n} task(s) overnight: {task_names}. "
-                f"Models used: {', '.join(sorted(model_summary))}. "
+                f"Model: {CLAUDE_MODEL}. "
                 f"{len(blocked)} item(s) blocked or needing input."
             )
 
@@ -392,7 +305,7 @@ class TaskExecutor:
                 f"### {i}. {t['slug']}",
                 f"- **Output:** {t['output_path']}",
                 f"- **Status:** {t['status']}",
-                f"- **Model:** {t['model_used']}",
+                f"- **Cost:** ~${t.get('cost_usd', 0):.4f}",
                 f"- **Notes:** {t['notes'] or 'None'}",
                 "",
             ]
@@ -421,16 +334,14 @@ class TaskExecutor:
         lines += [
             "",
             "## Token Usage & Cost",
-            f"- **Hermes 3 (OpenRouter):** "
-            f"~{self.stats.hermes_input_tokens + self.stats.hermes_output_tokens:,} tokens, "
-            f"~${self.stats.hermes_cost():.2f}",
-            f"- **Claude API (Sonnet):** "
-            f"~{self.stats.claude_input_tokens + self.stats.claude_output_tokens:,} tokens, "
-            f"~${self.stats.claude_cost():.2f}",
-            f"- **Total:** ~${self.stats.total_cost():.2f}",
+            f"- **Model:** {CLAUDE_MODEL}",
+            f"- **Input tokens:** {self.stats.input_tokens:,}",
+            f"- **Output tokens:** {self.stats.output_tokens:,}",
+            f"- **Total cost:** ~${self.stats.total_cost():.4f}",
         ]
 
-        return "\n".join(lines)
+        return "
+".join(lines)
 
     def _log_token_usage(self, today: str) -> None:
         """Append this session's token usage to the persistent log."""
@@ -439,23 +350,13 @@ class TaskExecutor:
 
         write_header = not log_path.exists() or log_path.stat().st_size == 0
 
-        hermes_total = self.stats.hermes_input_tokens + self.stats.hermes_output_tokens
-        claude_total = self.stats.claude_input_tokens + self.stats.claude_output_tokens
-
         with open(log_path, "a", encoding="utf-8") as f:
             if write_header:
                 f.write(TOKEN_LOG_HEADER)
             f.write(
-                f"{today} | hermes-3-70b      | {self.stats.hermes_input_tokens:>9,} | "
-                f"{self.stats.hermes_output_tokens:>10,} | ${self.stats.hermes_cost():>8.4f}\n"
-            )
-            f.write(
-                f"{today} | claude-sonnet-4   | {self.stats.claude_input_tokens:>9,} | "
-                f"{self.stats.claude_output_tokens:>10,} | ${self.stats.claude_cost():>8.4f}\n"
-            )
-            f.write(
-                f"{today} | TOTAL             | {hermes_total + claude_total:>9,} | "
-                f"{'':>10} | ${self.stats.total_cost():>8.4f}\n"
+                f"{today} | {CLAUDE_MODEL:<17} | {self.stats.input_tokens:>9,} | "
+                f"{self.stats.output_tokens:>10,} | ${self.stats.total_cost():>8.4f}
+"
             )
 
         log.info("Token usage logged to %s", log_path)
