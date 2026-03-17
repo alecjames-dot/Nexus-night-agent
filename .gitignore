@@ -12,9 +12,11 @@ venv/
 dist/
 build/
 
-# Runtime output (workspace output is on the VM, not in repo)
-workspace/output/
-workspace/briefs/
+# Runtime output contents (directories tracked via .gitkeep, contents are not)
+workspace/output/*
+workspace/briefs/*
+!workspace/output/.gitkeep
+!workspace/briefs/.gitkeep
 
 # Logs
 *.log
