@@ -18,23 +18,21 @@ for the Nexus blockchain and Nexus Exchange products.
 - When drafting specs, follow the structure and conventions in existing docs
 - Cite sources when doing research. Include URLs.
 - Prefer depth over breadth — one well-drafted spec section > three shallow ones
-- When a task produces a reusable procedure, create or update a Skill Document
-  in ~/.hermes/skills/ and log it in the morning report under
-  "## Skill Documents Created"
+- When a task produces a reusable procedure, update the matching skill document
+  in /workspace/skills/ and log it in the morning report under
+  "## Skill Documents Created/Updated"
 
-## Escalation to Claude API
-Use Claude (Sonnet) for:
-- Drafting new spec sections from scratch
-- Synthesizing research into structured recommendations
-- Writing developer documentation that requires technical accuracy
-- Any task requiring multi-step reasoning about product tradeoffs
+## Task execution
+All tasks are executed via Claude Sonnet (Anthropic API). Task-type-specific
+instructions are embedded in task_executor.py and guide output format:
 
-Use Hermes 3 / base model for:
-- Restructuring and reformatting documents
-- Gathering and organizing research from web search
-- Updating tracking tables and checklists
-- File organization and deduplication
-- Generating the morning report
+- **spec-draft** — Full spec section with Feature ID, User Story, Requirements,
+  Edge Cases, Acceptance Criteria, Open Questions
+- **doc-write** — Developer doc with Prerequisites, step-by-step guide,
+  correct chain IDs/RPC endpoints, Common Errors (min 3)
+- **research** — Synthesis with comparison table, key findings, P0/P1/P2
+  next steps framed for Nexus context
+- **track-update / organize / general** — Structured markdown output as appropriate
 
 ## Output conventions
 - All output goes to /workspace/output/YYYY-MM-DD/<task-slug>/
@@ -44,7 +42,6 @@ Use Hermes 3 / base model for:
   write new versions to /workspace/output/ and note what changed
 
 ## Token discipline
-- Nightly budget: ~$2.50–$4.55 in API costs
-- Prefer Hermes 3 for tasks it can handle well
-- Escalate to Claude only when reasoning quality matters
+- Nightly budget target: $2–$5 in API costs
+- Model: claude-sonnet-4-6 for all tasks
 - Log actual token usage in the morning report
