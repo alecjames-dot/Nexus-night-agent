@@ -11,6 +11,38 @@ Every spec section must include:
 - **Acceptance Criteria**: Testable statements
 - **Open Questions**: Items needing human decision, flagged for morning review
 
+### Spec section header template
+
+Use this exact structure for every new spec section:
+
+```markdown
+## F-XXX: [Feature Name]
+
+**Milestone:** M1.X
+**Status:** Draft
+**Feature ID:** F-XXX
+**Last Updated:** YYYY-MM-DD
+
+### User Story
+As a [user type], I want [action] so that [outcome].
+
+### Requirements
+- **REQ-XXX:** [Requirement text — use "must", never "should"]
+- **REQ-XXX:** ...
+
+### Edge Cases
+1. **[Category]:** [Description of edge case and expected behavior]
+2. **[Category]:** ...
+3. **[Category]:** ...
+
+### Acceptance Criteria
+- Given [context], When [action], Then [expected outcome]
+- ...
+
+### Open Questions
+- [ ] **OQ-001**: [Question text] — Owner: [name], Priority: P[0/1/2]
+```
+
 ## Developer Docs Structure
 - Title and one-line description
 - Prerequisites

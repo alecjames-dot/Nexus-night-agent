@@ -18,6 +18,9 @@ for the Nexus blockchain and Nexus Exchange products.
 - When drafting specs, follow the structure and conventions in existing docs
 - Cite sources when doing research. Include URLs.
 - Prefer depth over breadth — one well-drafted spec section > three shallow ones
+- When a task produces a reusable procedure, create or update a Skill Document
+  in ~/.hermes/skills/ and log it in the morning report under
+  "## Skill Documents Created"
 
 ## Escalation to Claude API
 Use Claude (Sonnet) for:
