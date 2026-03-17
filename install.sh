@@ -94,8 +94,8 @@ if [[ ! -f "$SYSTEM_ENV" ]]; then
 # Loaded by nexus-agent.service and all cron scripts.
 # Permissions: 640 — NEVER commit this file or expose it.
 
-# Anthropic API key (Claude Sonnet — all task execution)
-ANTHROPIC_API_KEY=sk-ant-REPLACE_ME
+# OpenRouter API key (routes to Claude Sonnet — all task execution)
+OPENROUTER_API_KEY=sk-or-REPLACE_ME
 
 # Telegram bot token (from @BotFather)
 TELEGRAM_BOT_TOKEN=REPLACE_ME
@@ -179,7 +179,7 @@ log " REQUIRED: Fill in your API keys:"
 log "   sudo nano $SYSTEM_ENV"
 log ""
 log " Keys needed:"
-log "   ANTHROPIC_API_KEY        — from console.anthropic.com"
+log "   OPENROUTER_API_KEY       — from openrouter.ai"
 log "   TELEGRAM_BOT_TOKEN       — from @BotFather on Telegram"
 log "   TELEGRAM_ALLOWED_USER_ID — your Telegram user ID (@userinfobot)"
 log ""
