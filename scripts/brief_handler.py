@@ -70,16 +70,30 @@ class BriefHandler:
         self.briefs_dir.mkdir(parents=True, exist_ok=True)
 
     def save_brief(self, text: str) -> Path:
-        """Save raw brief text to /workspace/briefs/YYYY-MM-DD.md."""
+        """Save raw brief text to /workspace/briefs/YYYY-MM-DD.md.
+
+        If a brief already exists for today (e.g. a correction or addition),
+        appends the new message with a timestamp separator rather than
+        overwriting — preserves the original brief and execution context.
+        """
         today = date.today().isoformat()
         path = self.briefs_dir / f"{today}.md"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        content = f"# Nightly Brief — {today}\n\n"
-        content += f"_Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
-        content += text
+        if path.exists():
+            addition = (
+                f"\n\n---\n_Addendum received: {timestamp}_\n\n{text}"
+            )
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(addition)
+            log.info("Brief addendum appended to %s", path)
+        else:
+            content = f"# Nightly Brief — {today}\n\n"
+            content += f"_Received: {timestamp}_\n\n"
+            content += text
+            path.write_text(content, encoding="utf-8")
+            log.info("Brief saved to %s", path)
 
-        path.write_text(content, encoding="utf-8")
-        log.info("Brief saved to %s", path)
         return path
 
     def parse_tasks(self, text: str) -> list[Task]:

@@ -1,11 +1,19 @@
 """
-Cron job: 11:30 PM weeknights
-Checks whether a brief was received today; sends a Telegram reminder if not.
+Cron jobs for nightly brief checking.
+
+Run modes (pass as first argument):
+  reminder  — 11:30 PM: send Telegram reminder if no brief received yet
+  fallback  — 00:05 AM: run standing tasks if still no brief by midnight
+
+Crontab:
+  30 23 * * 1-5  python3 /opt/nexus-night-agent/scripts/check_brief.py reminder
+  5  0  * * 2-6  python3 /opt/nexus-night-agent/scripts/check_brief.py fallback
 """
 
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -28,7 +36,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from brief_handler import BriefHandler
 
 
-async def main():
+async def send_reminder():
+    """11:30 PM: send Telegram reminder if no brief received."""
     handler = BriefHandler(WORKSPACE_ROOT)
 
     if handler.brief_received_today():
@@ -48,5 +57,36 @@ async def main():
     log.info("Reminder sent.")
 
 
+async def run_fallback():
+    """00:05 AM: if still no brief, run standing tasks automatically."""
+    handler = BriefHandler(WORKSPACE_ROOT)
+
+    if handler.brief_received_today():
+        log.info("Brief received before midnight — no fallback needed.")
+        return
+
+    log.info("No brief received by midnight. Starting standing task queue.")
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    await bot.send_message(
+        chat_id=TELEGRAM_ALLOWED_USER_ID,
+        text=(
+            "🌙 No brief received by midnight. "
+            "Starting the standing task queue automatically (P0 tasks)."
+        ),
+    )
+
+    scripts_dir = Path(__file__).parent
+    proc = subprocess.Popen(
+        [sys.executable, str(scripts_dir / "standing_tasks.py")],
+        stdout=open("/var/log/nexus-agent.log", "a"),
+        stderr=subprocess.STDOUT,
+    )
+    log.info("Standing tasks started (PID %d).", proc.pid)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    mode = sys.argv[1] if len(sys.argv) > 1 else "reminder"
+    if mode == "fallback":
+        asyncio.run(run_fallback())
+    else:
+        asyncio.run(send_reminder())

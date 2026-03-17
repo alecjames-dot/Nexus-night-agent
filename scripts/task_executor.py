@@ -144,6 +144,14 @@ class TaskExecutor:
         if skill_note:
             self.stats.skills_created.append(skill_note)
 
+        # Extract a brief notes snippet from the first non-empty line of output
+        notes = ""
+        for line in result_text.splitlines():
+            line = line.strip().lstrip("#").strip()
+            if line and not line.startswith("---"):
+                notes = line[:200]
+                break
+
         return {
             "task_number": task.number,
             "task_type": task.task_type,
@@ -151,7 +159,7 @@ class TaskExecutor:
             "model_used": model_used,
             "output_path": str(output_file.relative_to(self.workspace)),
             "status": "complete",
-            "notes": "",
+            "notes": notes,
         }
 
     def _load_context(self) -> str:
@@ -326,11 +334,14 @@ class TaskExecutor:
         n = len(completed)
         blocked = self.stats.blocked
 
-        if n == 0:
+        if n == 0 and not blocked:
             lines.append("No tasks were completed this session.")
         else:
+            task_names = ", ".join(t["slug"].replace("-", " ") for t in completed)
+            model_summary = {t["model_used"] for t in completed}
             lines.append(
-                f"Completed {n} task(s) overnight. "
+                f"Completed {n} task(s) overnight: {task_names}. "
+                f"Models used: {', '.join(sorted(model_summary))}. "
                 f"{len(blocked)} item(s) blocked or needing input."
             )
 

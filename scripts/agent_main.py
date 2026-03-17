@@ -17,6 +17,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 from brief_handler import BriefHandler
 from task_executor import TaskExecutor
+from standing_tasks import load_standing_tasks
 
 load_dotenv("/etc/nexus-agent.env")
 
@@ -58,6 +59,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = update.message.text.strip()
     log.info("Received message from authorized user: %r", text[:80])
 
+    # Intercept standing-tasks shortcut promised in the 11:30 PM reminder
+    if text.lower().strip() in ("use standing tasks", "standing tasks"):
+        await update.message.reply_text(
+            "Got it — working from the standing task queue tonight. "
+            "I'll send a morning report by 7 AM. 🌙"
+        )
+        asyncio.create_task(_run_standing_tasks(update))
+        return
+
     # Save as tonight's brief and confirm
     brief_path = brief_handler.save_brief(text)
     await update.message.reply_text(
@@ -82,6 +92,27 @@ async def _run_tasks(update: Update, brief_text: str) -> None:
         log.exception("Task execution failed: %s", exc)
         await update.message.reply_text(
             f"⚠️ Error during task execution: {exc}\n"
+            "Check /var/log/nexus-agent.log for details."
+        )
+
+
+async def _run_standing_tasks(update: Update) -> None:
+    """Execute the standing task queue (P0 tasks only)."""
+    try:
+        tasks = load_standing_tasks()
+        if not tasks:
+            await update.message.reply_text(
+                "Standing task queue is empty — nothing to execute."
+            )
+            return
+        await update.message.reply_text(
+            f"Running {len(tasks)} standing task(s) from the queue..."
+        )
+        await task_executor.execute_all(tasks, update)
+    except Exception as exc:
+        log.exception("Standing task execution failed: %s", exc)
+        await update.message.reply_text(
+            f"⚠️ Error during standing task execution: {exc}\n"
             "Check /var/log/nexus-agent.log for details."
         )
 
